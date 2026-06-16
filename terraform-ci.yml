@@ -1,6 +1,7 @@
+---
 name: Terraform CI
 
-on:
+'on':
   push:
     branches: [main]
     paths:
