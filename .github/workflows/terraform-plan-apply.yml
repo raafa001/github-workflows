@@ -1,0 +1,138 @@
+name: Terraform Plan/Apply/Destroy
+
+on:
+  workflow_call:
+    inputs:
+      working-dirs:
+        description: JSON array of working directories
+        required: true
+        type: string
+      command:
+        description: Terraform command (plan/apply/destroy)
+        required: false
+        type: string
+        default: plan
+      confirm:
+        description: Confirmation for apply/destroy
+        required: false
+        type: string
+        default: "no"
+      pr-number:
+        description: PR number for comments
+        required: false
+        type: number
+        default: 0
+      ref:
+        description: Git ref to checkout
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.command }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(inputs.working-dirs) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      - name: Authenticate private modules
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          echo "machine github.com login x-access-token password ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}" >> ~/.netrc && chmod 600 ~/.netrc
+
+      - name: Terraform Init
+        id: init
+        run: terraform init -backend=false -no-color 2>&1 | tee init_output.txt
+        working-directory: ${{ matrix.dir }}
+
+      - name: Terraform Plan
+        if: inputs.command == 'plan'
+        id: plan
+        run: |
+          terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        working-directory: ${{ matrix.dir }}
+        continue-on-error: true
+
+      - name: Confirm apply/destroy
+        if: inputs.command != 'plan'
+        run: |
+          if [ "${{ inputs.confirm }}" != "yes" ]; then
+            echo "Confirmation required. Set 'confirm: yes' to proceed with ${{ inputs.command }}."
+            echo "Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 1
+          fi
+          echo "Confirmation received. Proceeding with ${{ inputs.command }}..."
+
+      - name: Terraform Apply
+        if: inputs.command == 'apply' && inputs.confirm == 'yes'
+        run: terraform apply -auto-approve -no-color 2>&1
+        working-directory: ${{ matrix.dir }}
+
+      - name: Terraform Destroy
+        if: inputs.command == 'destroy' && inputs.confirm == 'yes'
+        run: terraform destroy -auto-approve -no-color 2>&1
+        working-directory: ${{ matrix.dir }}
+
+      - name: Post comment to PR
+        if: inputs.pr-number != 0 && inputs.command == 'plan'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planFile = '${{ matrix.dir }}/plan_output.txt';
+            let planOutput = 'Plan file not found';
+            try { planOutput = fs.readFileSync(planFile, 'utf8'); } catch(e) {}
+            const truncated = planOutput.length > 60000
+              ? planOutput.substring(0, 60000) + '\n... (truncated)'
+              : planOutput;
+            const runUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            const body = `## Terraform Plan - ${{ matrix.dir }}
+\`\`\`
+${truncated}
+\`\`\`
+**Actions:**
+• [Apply this plan](${{ github.server_url }}/${{ github.repository }}/actions/workflows/terraform-automation.yml) (set \`command: apply\` and \`confirm: yes\`)
+• [Destroy resources](${{ github.server_url }}/${{ github.repository }}/actions/workflows/terraform-automation.yml) (set \`command: destroy\` and \`confirm: yes\`)
+• [View this run](${runUrl})`;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.pr-number }},
+              body: body
+            });
+
+      - name: Post apply/destroy confirmation to PR
+        if: inputs.pr-number != 0 && inputs.command != 'plan'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ inputs.confirm }}' === 'yes' ? 'completed successfully' : 'requires confirmation';
+            const runUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.pr-number }},
+              body: `## Terraform ${{ inputs.command }} - ${{ matrix.dir }}
+Status: ${status}
+[View run details](${runUrl})
+
+${{ inputs.confirm != 'yes' && format('⚠️ **Action needed:** Go to [{0}]({1}) and re-run with `confirm: yes` to proceed.', github.workflow, runUrl) || '' }}`
+            });
