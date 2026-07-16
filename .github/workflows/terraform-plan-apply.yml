@@ -27,14 +27,13 @@ name: Terraform Plan/Apply/Destroy
         required: false
         type: string
         default: ""
-    # ALTERAÇÃO 1: Declarar explicitamente os secrets que o workflow reutilizável vai receber
+    # OIDC - não precisa de secrets AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
     secrets:
-      AWS_ACCESS_KEY_ID:
-        required: true
-      AWS_SECRET_ACCESS_KEY:
+      AWS_DEPLOY_ROLE_ARN:
         required: true
 
 permissions:
+  id-token: write
   contents: read
   pull-requests: write
 
@@ -43,12 +42,8 @@ jobs:
     name: Terraform ${{ inputs.command }}
     runs-on: ubuntu-latest
     
-    # ALTERAÇÃO 2: Injetar as credenciais como variáveis de ambiente para TODO o job.
-    # Assim, o Init, Plan, Apply e Destroy terão acesso automático às chaves da AWS.
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: us-east-1 # Altere para a sua região padrão caso necessário
+      AWS_DEFAULT_REGION: us-east-1
 
     strategy:
       fail-fast: false
@@ -63,6 +58,12 @@ jobs:
             ${{ inputs.ref ||
               github.event.pull_request.head.sha ||
               github.sha }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
