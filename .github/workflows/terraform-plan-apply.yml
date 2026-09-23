@@ -68,7 +68,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.9.0
+          terraform_version: v1.16.4
 
       - name: Authenticate private modules
         run: |
